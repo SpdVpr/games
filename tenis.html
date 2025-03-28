@@ -1,0 +1,541 @@
+<!DOCTYPE html>
+<html lang="cs">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>3D Stolní Tenis v1.1</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #2d2d2d; } /* Mírně světlejší pozadí */
+        canvas { display: block; }
+        #score {
+            position: absolute;
+            top: 10px;
+            left: 50%;
+            transform: translateX(-50%);
+            color: white;
+            font-size: 28px; /* Větší skóre */
+            font-family: 'Arial', sans-serif; /* Čistší font */
+            text-shadow: 2px 2px 5px rgba(0,0,0,0.7);
+        }
+        #instructions {
+            position: absolute;
+            bottom: 10px;
+            left: 10px;
+            color: #bdbdbd; /* Světlejší šedá */
+            font-size: 14px;
+            font-family: 'Arial', sans-serif;
+            text-shadow: 1px 1px 2px rgba(0,0,0,0.5);
+        }
+    </style>
+</head>
+<body>
+    <div id="score">Hráč: 0 - AI: 0</div>
+    <div id="instructions">Pohybuj myší pro ovládání pálky.</div>
+
+    <!-- Knihovny (načteno z CDN) -->
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+                "cannon-es": "https://unpkg.com/cannon-es@0.20.0/dist/cannon-es.js"
+            }
+        }
+    </script>
+
+    <!-- Herní skript -->
+    <script type="module">
+        import * as THREE from 'three';
+        import * as CANNON from 'cannon-es';
+        // import CannonDebugger from 'https://unpkg.com/cannon-es-debugger@1.0.0/dist/cannon-es-debugger.js'; // Pro ladění fyziky (volitelné)
+
+        // --- Globální proměnné ---
+        let scene, camera, renderer, world, cannonDebugger;
+        let playerPaddleBody, aiPaddleBody, ballBody; // Fyzikální tělesa
+        let playerPaddleMesh, aiPaddleMesh, ballMesh, tableMesh, netMesh; // Vizuální Meshe
+        let lastTime = 0;
+        let mouse = new THREE.Vector2();
+        let raycaster = new THREE.Raycaster();
+        let intersectPlane;
+        let scores = { player: 0, ai: 0 };
+        let gameActive = true;
+        let hitSound, scoreSound; // Zvuky budou načteny později
+
+        // --- Nastavení ---
+        const TABLE_WIDTH = 1.525;
+        const TABLE_LENGTH = 2.74;
+        const TABLE_HEIGHT = 0.05; // Tloušťka desky stolu
+        const TABLE_SURFACE_Y = 0; // Y pozice povrchu stolu
+        const NET_HEIGHT = 0.1525;
+        const BALL_RADIUS = 0.02;
+        const PADDLE_OFFSET_Z = TABLE_LENGTH / 2 + 0.1;
+        const PLAYER_PADDLE_Z = PADDLE_OFFSET_Z;
+        const AI_PADDLE_Z = -PADDLE_OFFSET_Z;
+        const MOUSE_SENSITIVITY = 1.5; // Mírně snížená citlivost
+        const AI_SPEED = 1.8; // Mírně pomalejší AI
+        const INITIAL_BALL_SPEED_Z = 4.0; // <<<< SNÍŽENÁ RYCHLOST MÍČKU
+        const INITIAL_BALL_SPEED_Y = 1.5; // <<<< Mírně nižší podání
+
+        // Rozměry pro vizuální pálku
+        const PADDLE_BLADE_RADIUS = 0.08;
+        const PADDLE_BLADE_THICKNESS = 0.015;
+        const PADDLE_HANDLE_RADIUS = 0.015;
+        const PADDLE_HANDLE_HEIGHT = 0.1;
+
+        // Rozměry pro (neviditelný) fyzikální box pálky - musí pokrýt hlavní úderovou plochu
+        const PADDLE_PHYSICS_WIDTH = PADDLE_BLADE_RADIUS * 2;
+        const PADDLE_PHYSICS_HEIGHT = PADDLE_BLADE_RADIUS * 2;
+        const PADDLE_PHYSICS_DEPTH = PADDLE_BLADE_THICKNESS * 1.5; // Trochu tlustší pro jistotu
+
+        const MAX_PADDLE_X = TABLE_WIDTH / 2 - PADDLE_PHYSICS_WIDTH / 2;
+        const MAX_PADDLE_Y_OFFSET = 0.2; // Maximální vertikální pohyb pálky nad stolem
+        const MIN_PADDLE_Y = TABLE_SURFACE_Y + PADDLE_PHYSICS_HEIGHT / 2;
+        const MAX_PADDLE_Y = MIN_PADDLE_Y + MAX_PADDLE_Y_OFFSET;
+
+        init();
+        animate();
+
+        // --- Inicializace ---
+        function init() {
+            // Zvuky (Base64 pro jednoduchost v jednom souboru)
+            hitSound = new Audio('data:audio/wav;base64,UklGRlIAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQQAAAAAAP///+j///8AAAAA'); // Krátký "ping"
+            scoreSound = new Audio('data:audio/wav;base64,UklGRlIAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQQAAAAAAAD+//3/9f/f/7X/s//J/8H/q//3/8n/y//P/9f/0f+9/7v/tf+p/7H/vf+5/6v/s//F/7n/rf+z/6n/p/+b/5X/kv+P/5H/kv+R/4//j/+L/4v/j/+Q/5P/lP+W/5f/mf+c/5//oP+k/6b/qv+s/7P/tv+6/7z/wP/D/8f/zP/R/9X/2f/b/97/4P/j/+f/6f/s/+7/8P/z//X/9//5//v//P/9//8='); // Skóre
+
+            // Scéna
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x2d2d2d);
+            scene.fog = new THREE.Fog(0x2d2d2d, 5, 15); // Přidání mlhy pro atmosféru
+
+            // Kamera - <<<< UPRAVENÁ POZICE
+            camera = new THREE.PerspectiveCamera(55, window.innerWidth / window.innerHeight, 0.1, 100);
+            camera.position.set(0, 1.8, PLAYER_PADDLE_Z + 1.0); // Výše a dál
+            camera.lookAt(0, 0, 0);
+
+            // Renderer
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.shadowMap.enabled = true;
+            renderer.shadowMap.type = THREE.PCFSoftShadowMap; // Měkčí stíny
+            document.body.appendChild(renderer.domElement);
+
+            // Světla
+            const ambientLight = new THREE.AmbientLight(0xffffff, 0.7);
+            scene.add(ambientLight);
+            const directionalLight = new THREE.DirectionalLight(0xffffff, 0.9);
+            directionalLight.position.set(3, 5, 4); // Mírně upravená pozice světla
+            directionalLight.castShadow = true;
+            directionalLight.shadow.mapSize.width = 2048; // Kvalitnější stíny
+            directionalLight.shadow.mapSize.height = 2048;
+            directionalLight.shadow.camera.near = 1;
+            directionalLight.shadow.camera.far = 15;
+            // Rozsah stínů
+            directionalLight.shadow.camera.left = -TABLE_WIDTH * 1.5;
+            directionalLight.shadow.camera.right = TABLE_WIDTH * 1.5;
+            directionalLight.shadow.camera.top = TABLE_LENGTH * 1.5;
+            directionalLight.shadow.camera.bottom = -TABLE_LENGTH * 1.5;
+
+            scene.add(directionalLight);
+            // scene.add( new THREE.CameraHelper( directionalLight.shadow.camera ) ); // Pro ladění stínů
+
+            // Fyzikální svět
+            world = new CANNON.World({ gravity: new CANNON.Vec3(0, -9.82, 0) });
+            world.broadphase = new CANNON.SAPBroadphase(world); // Efektivnější broadphase
+            world.solver.iterations = 12; // Více iterací pro stabilitu
+
+            // Debugger fyziky (volitelné)
+            // cannonDebugger = new CannonDebugger(scene, world, { color: 0x00ff00 });
+
+            // Materiály pro fyziku
+            const groundMaterial = new CANNON.Material("groundMaterial");
+            const paddleMaterial = new CANNON.Material("paddleMaterial");
+            const ballMaterial = new CANNON.Material("ballMaterial");
+
+            // Kontaktní materiály
+            const groundBallContact = new CANNON.ContactMaterial(groundMaterial, ballMaterial, {
+                friction: 0.05, // Nižší tření míčku o stůl
+                restitution: 0.75 // Mírně vyšší odraz od stolu
+            });
+            const paddleBallContact = new CANNON.ContactMaterial(paddleMaterial, ballMaterial, {
+                friction: 0.1, // Nízké tření o pálku
+                restitution: 0.85 // Mírně nižší odraz od pálky
+            });
+            const groundPaddleContact = new CANNON.ContactMaterial(groundMaterial, paddleMaterial, {
+                friction: 1.0, // Vysoké tření (aby pálka neklouzala po stole, i když by neměla)
+                restitution: 0.0 // Žádný odraz
+            });
+            world.addContactMaterial(groundBallContact);
+            world.addContactMaterial(paddleBallContact);
+            world.addContactMaterial(groundPaddleContact);
+
+            // --- Tvorba Objektů ---
+            // Stůl
+            const tableGeo = new THREE.BoxGeometry(TABLE_WIDTH, TABLE_HEIGHT, TABLE_LENGTH);
+            const tableMat = new THREE.MeshStandardMaterial({ color: 0x004080, roughness: 0.5, metalness: 0.1 }); // Modrý stůl
+            tableMesh = new THREE.Mesh(tableGeo, tableMat);
+            tableMesh.position.y = TABLE_SURFACE_Y - TABLE_HEIGHT / 2; // Posunout pod povrch
+            tableMesh.receiveShadow = true;
+            scene.add(tableMesh);
+            // Fyzika stolu
+            const tableShape = new CANNON.Box(new CANNON.Vec3(TABLE_WIDTH / 2, TABLE_HEIGHT / 2, TABLE_LENGTH / 2));
+            const tableBody = new CANNON.Body({ mass: 0, material: groundMaterial });
+            tableBody.addShape(tableShape);
+            tableBody.position.copy(tableMesh.position);
+            world.addBody(tableBody);
+
+            // Síť
+            const netGeo = new THREE.PlaneGeometry(TABLE_WIDTH, NET_HEIGHT); // Použijeme Plane pro síť
+            const netMat = new THREE.MeshBasicMaterial({ color: 0xffffff, side: THREE.DoubleSide, transparent: true, opacity: 0.7 });
+            netMesh = new THREE.Mesh(netGeo, netMat);
+            netMesh.position.set(0, TABLE_SURFACE_Y + NET_HEIGHT / 2, 0);
+            netMesh.rotation.x = Math.PI / 2; // Otočíme plochu, aby stála
+            // netMesh.castShadow = true; // Síť nemusí vrhat stín
+            scene.add(netMesh);
+             // Fyzika sítě (jako tenký box)
+            const netShape = new CANNON.Box(new CANNON.Vec3(TABLE_WIDTH / 2, 0.005, NET_HEIGHT / 2)); // x, z, y pro otočený tvar
+            const netBody = new CANNON.Body({ mass: 0, material: groundMaterial });
+            netBody.addShape(netShape);
+            // Pozice fyziky musí odpovídat středu sítě
+            netBody.position.set(0, TABLE_SURFACE_Y + NET_HEIGHT / 2, 0);
+             // Fyzikální těleso nemusíme otáčet, PlaneGeometry byla otočena vizuálně
+            world.addBody(netBody);
+
+            // Míček
+            const ballGeo = new THREE.SphereGeometry(BALL_RADIUS, 24, 24); // Hladší míček
+            const ballMat = new THREE.MeshStandardMaterial({ color: 0xff8c00, roughness: 0.3, metalness: 0.0 }); // Tmavší oranžová
+            ballMesh = new THREE.Mesh(ballGeo, ballMat);
+            ballMesh.castShadow = true;
+            ballMesh.receiveShadow = true;
+            scene.add(ballMesh);
+            // Fyzika míčku
+            const ballShape = new CANNON.Sphere(BALL_RADIUS);
+            ballBody = new CANNON.Body({ mass: 0.0027, material: ballMaterial });
+            ballBody.addShape(ballShape);
+            ballBody.linearDamping = 0.15; // <<<< MÍRNĚ ZVÝŠENÉ TLUMENÍ
+            ballBody.angularDamping = 0.15;
+            world.addBody(ballBody);
+            ballBody.addEventListener('collide', handleBallCollision);
+
+            // --- Pálky ---
+            // Funkce pro vytvoření vizuální pálky
+            function createPaddleMeshVisual(color1, color2) {
+                const paddleGroup = new THREE.Group();
+
+                // Materiály
+                const rubberMat1 = new THREE.MeshStandardMaterial({ color: color1, roughness: 0.8, metalness: 0.0 });
+                const rubberMat2 = new THREE.MeshStandardMaterial({ color: color2, roughness: 0.8, metalness: 0.0 });
+                const handleMat = new THREE.MeshStandardMaterial({ color: 0x8B4513, roughness: 0.7, metalness: 0.0 }); // Hnědá rukojeť
+
+                // Plát pálky (tenký válec) - 2 části pro různé barvy
+                const bladeGeo = new THREE.CylinderGeometry(PADDLE_BLADE_RADIUS, PADDLE_BLADE_RADIUS, PADDLE_BLADE_THICKNESS / 2, 32);
+
+                const bladeMesh1 = new THREE.Mesh(bladeGeo, rubberMat1);
+                bladeMesh1.rotation.z = Math.PI / 2; // Otočit, aby stál na hraně
+                bladeMesh1.position.x = PADDLE_BLADE_THICKNESS / 4; // Posunout mírně
+                bladeMesh1.castShadow = true;
+                bladeMesh1.receiveShadow = true;
+                paddleGroup.add(bladeMesh1);
+
+                const bladeMesh2 = new THREE.Mesh(bladeGeo, rubberMat2);
+                bladeMesh2.rotation.z = Math.PI / 2;
+                bladeMesh2.position.x = -PADDLE_BLADE_THICKNESS / 4; // Posunout na druhou stranu
+                bladeMesh2.castShadow = true;
+                bladeMesh2.receiveShadow = true;
+                paddleGroup.add(bladeMesh2);
+
+
+                // Rukojeť (válec)
+                const handleGeo = new THREE.CylinderGeometry(PADDLE_HANDLE_RADIUS, PADDLE_HANDLE_RADIUS * 0.8, PADDLE_HANDLE_HEIGHT, 16); // Mírně se zužující
+                const handleMesh = new THREE.Mesh(handleGeo, handleMat);
+                // Posunout rukojeť dolů pod plát
+                handleMesh.position.y = -PADDLE_HANDLE_HEIGHT / 2 - PADDLE_BLADE_RADIUS * 0.1; // Mírný offset od plátu
+                handleMesh.rotation.z = Math.PI / 2; // Otočit, aby ležel správně k pálce
+                handleMesh.castShadow = true;
+                handleMesh.receiveShadow = true;
+                paddleGroup.add(handleMesh);
+
+                // Otočíme celou grupu, aby pálka směřovala správně (úderová plocha v XY)
+                paddleGroup.rotation.y = Math.PI / 2;
+
+                return paddleGroup;
+            }
+
+            // Hráčova pálka
+            playerPaddleMesh = createPaddleMeshVisual(0xff0000, 0x111111); // Červená/Černá
+            scene.add(playerPaddleMesh);
+            // Fyzika hráčovy pálky (stále Box pro jednoduchost)
+            const paddleShape = new CANNON.Box(new CANNON.Vec3(PADDLE_PHYSICS_WIDTH / 2, PADDLE_PHYSICS_HEIGHT / 2, PADDLE_PHYSICS_DEPTH / 2));
+            playerPaddleBody = new CANNON.Body({
+                type: CANNON.Body.KINEMATIC,
+                material: paddleMaterial
+            });
+            playerPaddleBody.addShape(paddleShape);
+            playerPaddleBody.position.set(0, MIN_PADDLE_Y, PLAYER_PADDLE_Z);
+            world.addBody(playerPaddleBody);
+
+            // AI pálka
+            aiPaddleMesh = createPaddleMeshVisual(0x0000ff, 0x111111); // Modrá/Černá
+            scene.add(aiPaddleMesh);
+            // Fyzika AI pálky
+            aiPaddleBody = new CANNON.Body({
+                type: CANNON.Body.KINEMATIC,
+                material: paddleMaterial
+            });
+            aiPaddleBody.addShape(paddleShape); // Stejný fyzikální tvar
+            aiPaddleBody.position.set(0, MIN_PADDLE_Y, AI_PADDLE_Z);
+            world.addBody(aiPaddleBody);
+
+
+            // Neviditelná rovina pro sledování myši
+            const planeGeometry = new THREE.PlaneGeometry(TABLE_WIDTH * 3, 3); // Dostatečně velká
+            intersectPlane = new THREE.Mesh(planeGeometry, new THREE.MeshBasicMaterial({ visible: false, side: THREE.DoubleSide, transparent: true, opacity: 0.5 })); // Můžeme zviditelnit pro ladění
+            intersectPlane.position.z = PLAYER_PADDLE_Z; // Na úrovni Z pálky hráče
+            scene.add(intersectPlane);
+
+            // --- Event Listenery ---
+            window.addEventListener('resize', onWindowResize);
+            window.addEventListener('mousemove', onMouseMove);
+
+            // Startovní pozice míčku
+            resetBall();
+        }
+
+        // --- Smyčka hry ---
+        function animate(time) {
+            requestAnimationFrame(animate);
+
+            const dt = Math.min((time - lastTime) / 1000, 1 / 30); // Delta time s omezením
+            lastTime = time;
+
+            if (gameActive) {
+                // Aktualizace fyziky
+                world.step(1 / 60, dt, 3); // Pevný krok pro fyziku
+
+                // Aktualizace pozic vizuálních objektů podle fyziky
+                ballMesh.position.copy(ballBody.position);
+                ballMesh.quaternion.copy(ballBody.quaternion);
+
+                // Pálky - vizuální mesh kopíruje pozici fyzikálního tělesa
+                playerPaddleMesh.position.copy(playerPaddleBody.position);
+                playerPaddleMesh.quaternion.copy(playerPaddleBody.quaternion);
+                // Dodatečná rotace vizuální pálky pro správnou orientaci (pokud je třeba)
+                // playerPaddleMesh.rotation.y = Math.PI / 2; // Toto je nyní řešeno v createPaddleMeshVisual
+
+                aiPaddleMesh.position.copy(aiPaddleBody.position);
+                aiPaddleMesh.quaternion.copy(aiPaddleBody.quaternion);
+                // aiPaddleMesh.rotation.y = Math.PI / 2;
+
+                 // Aktualizace AI
+                updateAI(dt);
+
+                // Kontrola, zda míček není mimo hru
+                checkBallOutOfBounds();
+            }
+
+            // Debugger fyziky (pokud je aktivní)
+            // if (cannonDebugger) cannonDebugger.update();
+
+            // Renderování scény
+            renderer.render(scene, camera);
+        }
+
+        // --- Ovládání hráče ---
+        function onMouseMove(event) {
+            mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
+            mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
+
+            raycaster.setFromCamera(mouse, camera);
+            const intersects = raycaster.intersectObject(intersectPlane);
+
+            if (intersects.length > 0) {
+                const intersectPoint = intersects[0].point;
+
+                // Cílová pozice pálky - zohledníme citlivost a základní pozici kamery/pálky
+                let targetX = intersectPoint.x; // Přímé mapování X z průsečíku
+                let targetY = intersectPoint.y; // Přímé mapování Y z průsečíku
+
+                // Aplikujeme citlivost jemněji - násobení může být příliš agresivní
+                // Místo toho můžeme použít lerp nebo omezit maximální rychlost změny,
+                // ale pro jednoduchost teď jen omezíme výsledné pozice.
+
+                // Omezení pohybu pálky
+                targetX = Math.max(-MAX_PADDLE_X, Math.min(MAX_PADDLE_X, targetX));
+                targetY = Math.max(MIN_PADDLE_Y, Math.min(MAX_PADDLE_Y, targetY));
+
+                // Přímo nastavíme pozici kinematického tělesa
+                // Použijeme mírné tlumení pohybu pro plynulost (lerp)
+                playerPaddleBody.position.x = THREE.MathUtils.lerp(playerPaddleBody.position.x, targetX, 0.8);
+                playerPaddleBody.position.y = THREE.MathUtils.lerp(playerPaddleBody.position.y, targetY, 0.8);
+                // playerPaddleBody.position.x = targetX; // Bez tlumení
+                // playerPaddleBody.position.y = targetY; // Bez tlumení
+            }
+        }
+
+        // --- AI Soupeře ---
+        function updateAI(dt) {
+            // AI se snaží dostat na X souřadnici míčku a mírně předvídat Y
+            const targetX = ballBody.position.x;
+            let targetY = MIN_PADDLE_Y; // Základní výška
+
+            // Jednoduchá predikce Y - pokud míček letí k AI a je nad stolem
+            if (ballBody.velocity.z < -1 && ballBody.position.y > TABLE_SURFACE_Y + BALL_RADIUS * 2) {
+                // Odhad, kde bude míček na úrovni AI pálky (velmi hrubý)
+                const timeToReachAI = Math.abs((AI_PADDLE_Z - ballBody.position.z) / ballBody.velocity.z);
+                const predictedY = ballBody.position.y + ballBody.velocity.y * timeToReachAI + 0.5 * world.gravity.y * timeToReachAI * timeToReachAI;
+                targetY = Math.max(MIN_PADDLE_Y, Math.min(MAX_PADDLE_Y, predictedY)); // Omezit predikovanou výšku
+            } else {
+                // Pokud míček letí pryč nebo je nízko, vrátí se do základní výšky
+                targetY = MIN_PADDLE_Y + (MAX_PADDLE_Y - MIN_PADDLE_Y) * 0.2; // Mírně nad stolem
+            }
+
+
+            const currentX = aiPaddleBody.position.x;
+            const currentY = aiPaddleBody.position.y;
+            const diffX = targetX - currentX;
+            const diffY = targetY - currentY;
+
+            // Pohyb pálky s omezenou rychlostí (lerp pro plynulost)
+            const moveLerpFactor = AI_SPEED * dt * 5; // Faktor pro lerp, upravit dle potřeby
+
+            let newX = THREE.MathUtils.lerp(currentX, targetX, moveLerpFactor);
+            let newY = THREE.MathUtils.lerp(currentY, targetY, moveLerpFactor);
+
+            // Omezení pozice AI pálky
+            newX = Math.max(-MAX_PADDLE_X, Math.min(MAX_PADDLE_X, newX));
+            newY = Math.max(MIN_PADDLE_Y, Math.min(MAX_PADDLE_Y, newY));
+
+            aiPaddleBody.position.x = newX;
+            aiPaddleBody.position.y = newY;
+        }
+
+        // --- Reset míčku ---
+        function resetBall(server = 'ai') {
+            gameActive = false;
+            ballBody.velocity.set(0, 0, 0);
+            ballBody.angularVelocity.set(0, 0, 0);
+
+            let serveZ = -TABLE_LENGTH / 4; // Blíže ke středu pro AI
+            let serveDirection = 1;
+
+             if (server === 'player') {
+                 serveZ = TABLE_LENGTH / 4; // Blíže ke středu pro hráče
+                 serveDirection = -1;
+             }
+
+            ballBody.position.set(Math.random() * 0.2 - 0.1, TABLE_SURFACE_Y + 0.3, serveZ); // Vyšší startovní pozice Y
+
+            setTimeout(() => {
+                const velX = Math.random() * 1.5 - 0.75; // Menší rozptyl do stran
+                const velZ = INITIAL_BALL_SPEED_Z * serveDirection; // Použití konstanty
+                const velY = INITIAL_BALL_SPEED_Y + Math.random() * 0.5; // Použití konstanty + malá variace
+                ballBody.velocity.set(velX, velY, velZ);
+                gameActive = true;
+            }, 1000);
+        }
+
+         // --- Kontrola míčku mimo hřiště ---
+         function checkBallOutOfBounds() {
+            const pos = ballBody.position;
+            const vel = ballBody.velocity;
+            let scorer = null;
+
+            // Míček spadl pod úroveň stolu (s rezervou)
+            if (pos.y < TABLE_SURFACE_Y - BALL_RADIUS * 2) {
+                // Kdo skóroval záleží na tom, na čí polovině dopadl
+                 scorer = (pos.z > 0) ? 'ai' : 'player';
+                console.log(`Ball out (Y) at Z=${pos.z.toFixed(2)}. Scorer: ${scorer}`);
+            }
+            // Míček je za hráčovou pálkou (s rezervou)
+            else if (pos.z > PLAYER_PADDLE_Z + PADDLE_PHYSICS_DEPTH) {
+                scorer = 'ai';
+                 console.log(`Ball out (+Z). Scorer: ${scorer}`);
+            }
+            // Míček je za AI pálkou (s rezervou)
+            else if (pos.z < AI_PADDLE_Z - PADDLE_PHYSICS_DEPTH) {
+                scorer = 'player';
+                 console.log(`Ball out (-Z). Scorer: ${scorer}`);
+            }
+            // Míček je moc daleko do stran (s rezervou)
+            else if (Math.abs(pos.x) > TABLE_WIDTH / 2 + BALL_RADIUS * 5) {
+                 scorer = (pos.z > 0) ? 'ai' : 'player'; // Na čí polovině vyletěl
+                 console.log(`Ball out (X) at Z=${pos.z.toFixed(2)}. Scorer: ${scorer}`);
+            }
+
+            if (scorer) {
+                scorePoint(scorer);
+            }
+         }
+
+         // --- Skórování ---
+         function scorePoint(winner) {
+             if (!gameActive) return;
+
+             scoreSound.play().catch(e => console.warn("Score sound playback failed:", e));
+
+             if (winner === 'player') {
+                 scores.player++;
+                 resetBall('ai'); // AI podává po bodu hráče
+             } else {
+                 scores.ai++;
+                 resetBall('player'); // Hráč podává po bodu AI
+             }
+             updateScoreboard();
+         }
+
+         // --- Aktualizace tabulky skóre ---
+         function updateScoreboard() {
+             const scoreElement = document.getElementById('score');
+             scoreElement.textContent = `Hráč: ${scores.player} - AI: ${scores.ai}`;
+         }
+
+         // --- Zpracování kolize míčku ---
+         function handleBallCollision(event) {
+             const impactVelocity = event.contact.getImpactVelocityAlongNormal();
+             const contactBody = event.contact.bi === ballBody ? event.contact.bj : event.contact.bi; // Těleso, se kterým míček kolidoval
+
+             // Přehrát zvuk při odrazu od pálky nebo stolu s dostatečnou silou
+             if (contactBody.material === paddleMaterial || contactBody.material === groundMaterial) {
+                 const volume = Math.min(Math.abs(impactVelocity) / 10, 1); // Hlasitost podle síly nárazu
+                 if (volume > 0.1) { // Jen pokud je náraz trochu silnější
+                     hitSound.currentTime = 0;
+                     hitSound.volume = volume;
+                     hitSound.play().catch(e => console.warn("Hit sound playback failed:", e));
+                 }
+             }
+
+             // Pokud míček narazil do pálky, můžeme mu přidat trochu rotace (velmi zjednodušeně)
+              if (contactBody.material === paddleMaterial) {
+                 // Získání relativní rychlosti pálky vůči míčku v bodě kontaktu
+                 const paddleVelocity = contactBody.velocity; // Kinematické těleso má velocity
+                 const paddleAngularVelocity = contactBody.angularVelocity; // Může mít i rotaci
+
+                 // Normála kontaktu
+                 const normal = event.contact.ni; // Normála směřující z bodyB do bodyA (předpokládejme, že ballBody je A)
+                 // Pokud je míček B, otočíme normálu
+                 if (event.contact.bi === ballBody) {
+                     normal.negate(normal);
+                 }
+
+                 // Jednoduchý odhad spinu podle pohybu pálky nahoru/dolů a normály
+                 // Pokud se pálka pohybuje nahoru při úderu shora (normal.y < 0), přidáme topspin (kolem X)
+                 // Pokud se pálka pohybuje dolů při úderu zespoda (normal.y > 0), přidáme backspin (kolem X)
+                 const spinFactor = 2; // Jak moc rotace přidat
+                 if (paddleVelocity.y > 0.1 && normal.y < -0.5) { // Topspin
+                     ballBody.angularVelocity.x -= spinFactor * paddleVelocity.y;
+                 } else if (paddleVelocity.y < -0.1 && normal.y > 0.5) { // Backspin
+                     ballBody.angularVelocity.x -= spinFactor * paddleVelocity.y; // velocity.y je záporná, takže +=
+                 }
+                 // Omezení maximální rotace
+                 const maxSpin = 30;
+                 ballBody.angularVelocity.x = Math.max(-maxSpin, Math.min(maxSpin, ballBody.angularVelocity.x));
+              }
+         }
+
+        // --- Změna velikosti okna ---
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+    </script>
+</body>
+</html>

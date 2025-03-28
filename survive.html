@@ -1,0 +1,693 @@
+<!DOCTYPE html>
+<html lang="cs">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Pixel Survivor</title>
+    <style>
+        /* Styly zůstávají velmi podobné předchozí verzi */
+        body {
+            display: flex; flex-direction: column; align-items: center; justify-content: center;
+            min-height: 100vh; margin: 0; background-color: #1a1a1a;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; color: #eee; overflow: hidden;
+        }
+        canvas {
+            border: 2px solid #888; background-color: #282c34; cursor: crosshair;
+             /* Vypneme vyhlazování pro pixel art vzhled */
+             image-rendering: pixelated;
+             image-rendering: -moz-crisp-edges;
+             image-rendering: crisp-edges;
+        }
+        #ui-container { margin-top: 10px; width: 800px; display: flex; justify-content: space-between; align-items: center; font-size: 1.1em; flex-wrap: wrap; }
+        .ui-item { margin: 5px 10px; }
+        #xp-bar-container { width: 200px; height: 20px; background-color: #444; border: 1px solid #666; border-radius: 5px; overflow: hidden; }
+        #xp-bar { width: 0%; height: 100%; background-color: #4caf50; transition: width 0.2s ease-in-out; }
+        #level-up-screen, #game-over-screen {
+            position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+            background-color: rgba(20, 20, 20, 0.95); padding: 30px; border-radius: 10px;
+            text-align: center; display: none; z-index: 10; border: 2px solid #aaa; color: #eee; min-width: 300px;
+        }
+        #level-up-screen h2, #game-over-screen h2 { margin-top: 0; }
+        #game-over-screen { background-color: rgba(50, 0, 0, 0.95); border-color: #f44336; color: #fdd; }
+        .upgrade-button, #restart-button {
+            display: block; background-color: #4CAF50; color: white; padding: 12px 20px; margin: 10px auto;
+            border: none; border-radius: 5px; cursor: pointer; font-size: 1em; min-width: 250px; transition: background-color 0.2s;
+            text-align: left; /* Zarovnání textu v tlačítku */
+            line-height: 1.4;
+        }
+         .upgrade-button small { display: block; font-size: 0.85em; color: #ccc; }
+        .upgrade-button:hover { background-color: #45a049; }
+        #restart-button { background-color: #f44336; font-size: 1.1em; min-width: 150px; text-align: center; }
+        #restart-button:hover { background-color: #d32f2f;}
+        #timer { font-size: 1.2em; font-weight: bold; }
+    </style>
+</head>
+<body>
+
+    <h1>Pixel Survivor</h1>
+    <canvas id="gameCanvas" width="800" height="600"></canvas>
+    <div id="ui-container">
+        <span class="ui-item">Zdraví: <span id="health">100</span></span>
+        <span class="ui-item">Úroveň: <span id="level">1</span></span>
+        <div class="ui-item" id="xp-bar-container"><div id="xp-bar"></div></div>
+        <span class="ui-item">XP: <span id="xp-value">0</span> / <span id="xp-needed">10</span></span>
+        <span class="ui-item">Čas: <span id="timer">0:00</span></span>
+    </div>
+    <div id="level-up-screen">
+        <h2>Postup na další úroveň!</h2>
+        <p>Vyber si vylepšení:</p>
+        <div id="upgrade-options"></div>
+    </div>
+    <div id="game-over-screen">
+        <h2>Konec hry!</h2>
+        <p>Přežil jsi <span id="final-time">0:00</span></p>
+        <p>Dosáhl jsi úrovně <span id="final-level">1</span></p>
+        <button id="restart-button">Hrát znovu</button>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        // Vypnutí vyhlazování pro pixel art
+        ctx.imageSmoothingEnabled = false;
+
+        // --- UI a ostatní proměnné (zůstávají stejné) ---
+        const healthDisplay = document.getElementById('health'); /* ... atd. ... */
+        const levelDisplay = document.getElementById('level');
+        const xpBar = document.getElementById('xp-bar');
+        const xpValueDisplay = document.getElementById('xp-value');
+        const xpNeededDisplay = document.getElementById('xp-needed');
+        const levelUpScreen = document.getElementById('level-up-screen');
+        const upgradeOptionsContainer = document.getElementById('upgrade-options');
+        const gameOverScreen = document.getElementById('game-over-screen');
+        const restartButton = document.getElementById('restart-button');
+        const timerDisplay = document.getElementById('timer');
+        const finalTimeDisplay = document.getElementById('final-time');
+        const finalLevelDisplay = document.getElementById('final-level');
+
+        // --- Herní Konstanty ---
+        // Pixel art scale - jak velký bude jeden "pixel" na plátně
+        const PIXEL_SCALE = 3;
+        // PLAYER_SIZE bude odvozen od spritu
+        const PROJECTILE_SIZE = 8;
+        const XP_ORB_SIZE = 6;
+        const PLAYER_BASE_SPEED = 2.5;
+        const ENEMY_BASE_SPEED = 1;
+        const PROJECTILE_SPEED = 6;
+        const PROJECTILE_MAX_BOUNCES = 1;
+        // FIRE_RATE bude u zbraní
+        const ENEMY_SPAWN_RATE_START = 80;
+        const ENEMY_SPAWN_RATE_MIN = 25;
+        const ENEMY_HEALTH_START = 10;
+        const ENEMY_DAMAGE = 10;
+        const XP_PER_ENEMY = 3;
+        const LEVEL_XP_BASE = 10;
+        const LEVEL_XP_FACTOR = 1.5;
+        const PLAYER_BASE_HEALTH = 100;
+        const INVINCIBILITY_DURATION = 30;
+
+        // --- Pixel Art Definice ---
+        const SPRITES = {
+            player: {
+                size: 8, // Velikost spritu v pixelech
+                colors: {'b': '#61dafb', 'e': '#ffffff', 'o': '#21252b', 's': '#444'}, // b=body, e=eye, o=outline, s=shadow
+                map: [
+                    "  oooo  ",
+                    " ooBBoo ",
+                    " oBeBeo ",
+                    " oBBBBoo",
+                    " ooBBBo ",
+                    " oBsBBoo",
+                    " ooosso ",
+                    "  oooo  "
+                ].map(row => row.toUpperCase()) // Použijeme velká písmena pro barvy
+            },
+            slime: {
+                size: 8,
+                colors: {'r': '#f44336', 'e': '#ffffff', 'o': '#5a0000', 'h': '#ff7961'}, // r=red, e=eye, o=outline, h=highlight
+                map: [
+                    "  oooo  ",
+                    " ooRRoo ",
+                    " oReReo ",
+                    " oRRRRoo",
+                    " ohRRRRo",
+                    " oRRRRoo",
+                    " ooRRoo ",
+                    "  oooo  "
+                ].map(row => row.toUpperCase())
+            },
+            brute: {
+                size: 10,
+                colors: {'p': '#9c27b0', 'e': '#f1f1f1', 'o': '#3e004d', 's': '#6a0080'}, // p=purple, e=eye, o=outline, s=shade
+                map: [
+                    " ooooooooo",
+                    " oPPPPPPPo",
+                    " oPPePePPo",
+                    " oPPPPPPPo",
+                    " oPssssPPo",
+                    " oPssssPPo",
+                    " oPssssPPo",
+                    " oPPPPPPPo",
+                    " oPPPPPPPo",
+                    " ooooooooo",
+                ].map(row => row.toUpperCase())
+            },
+            flyer: {
+                size: 6,
+                colors: {'o': '#ff9800', 'w': '#ffffff', 'k': '#444444'}, // o=orange, w=wing, k=black
+                map: [
+                    " kkkk ",
+                    "koookk",
+                    "kwoowk",
+                    "kwoowk",
+                    "kkook ",
+                    "  kk  "
+                ].map(row => row.toUpperCase())
+            }
+        };
+
+        // --- Typy Nepřátel (nyní odkazují na SPRITES) ---
+        const enemyTypes = [
+            { id: 'slime', sprite: SPRITES.slime, healthMultiplier: 1.0, speedMultiplier: 1.0, xpMultiplier: 1.0 },
+            { id: 'brute', sprite: SPRITES.brute, healthMultiplier: 2.5, speedMultiplier: 0.7, xpMultiplier: 1.5 },
+            { id: 'flyer', sprite: SPRITES.flyer, healthMultiplier: 0.6, speedMultiplier: 1.4, xpMultiplier: 0.8 },
+        ];
+
+        // --- Herní Stav ---
+        let player = {}; // Bude inicializován v resetPlayerState
+        let enemies = [];
+        let projectiles = [];
+        let xpOrbs = [];
+        let keysPressed = {};
+        let mousePos = { x: 0, y: 0 };
+        // fireCooldown bude u zbraní
+        let enemySpawnCooldown = ENEMY_SPAWN_RATE_START;
+        let currentEnemySpawnRate = ENEMY_SPAWN_RATE_START;
+        let currentEnemyHealthBase = ENEMY_HEALTH_START;
+        let gameTime = 0;
+        let gameTimerInterval;
+        let isPaused = false;
+        let isGameOver = false;
+        let animationFrameId = null;
+        let playerInvincibleTimer = 0;
+        let currentUpgradeChoices = [];
+
+        // --- Pomocné funkce (většina zůstává stejná) ---
+        function distance(x1, y1, x2, y2) { /* ... */ const dx = x1 - x2; const dy = y1 - y2; return Math.sqrt(dx * dx + dy * dy); }
+        function getRandomInt(min, max) { /* ... */ return Math.floor(Math.random() * (max - min + 1)) + min; }
+        function formatTime(seconds) { /* ... */ const min = Math.floor(seconds / 60); const sec = Math.floor(seconds % 60); return `${min}:${sec.toString().padStart(2, '0')}`; }
+        function getMousePos(canvas, evt) { /* ... */ const rect = canvas.getBoundingClientRect(); return { x: evt.clientX - rect.left, y: evt.clientY - rect.top }; }
+
+        // --- Inicializace a Restart ---
+        function resetPlayerState() {
+            const sprite = SPRITES.player;
+            const sizeOnCanvas = sprite.size * PIXEL_SCALE;
+             player = {
+                x: canvas.width / 2 - sizeOnCanvas / 2,
+                y: canvas.height / 2 - sizeOnCanvas / 2,
+                sprite: sprite, // Odkaz na sprite data
+                size: sizeOnCanvas, // Aktuální velikost na canvasu pro kolize
+                baseSize: sprite.size, // Velikost v pixelech spritu
+                speed: PLAYER_BASE_SPEED,
+                health: PLAYER_BASE_HEALTH,
+                maxHealth: PLAYER_BASE_HEALTH,
+                level: 1,
+                xp: 0,
+                xpToNextLevel: LEVEL_XP_BASE,
+                color: '#61dafb', // Záložní barva, pokud by sprite selhal
+                // --- ZBRANĚ ---
+                weapons: [
+                    // Začínáme s pistolí úrovně 1
+                    { id: 'pistol', level: 1, cooldown: 0, baseFireRate: 40, baseDamage: 10, projectilesPerShot: 1 }
+                ],
+                // Staty ovlivněné vylepšeními
+                statModifiers: {
+                    fireRateMultiplier: 1.0,
+                    damageMultiplier: 1.0,
+                    areaMultiplier: 1.0,
+                }
+            };
+        }
+
+        function resetGameState() {
+            resetPlayerState();
+            enemies = []; projectiles = []; xpOrbs = []; keysPressed = {};
+            mousePos = { x: player.x + player.size / 2, y: player.y + player.size / 2 };
+            enemySpawnCooldown = ENEMY_SPAWN_RATE_START;
+            currentEnemySpawnRate = ENEMY_SPAWN_RATE_START;
+            currentEnemyHealthBase = ENEMY_HEALTH_START;
+            gameTime = 0; isPaused = false; isGameOver = false; playerInvincibleTimer = 0; currentUpgradeChoices = [];
+
+            healthDisplay.textContent = player.health; /* ... reset UI ... */
+            levelDisplay.textContent = player.level;
+            xpValueDisplay.textContent = player.xp; xpNeededDisplay.textContent = player.xpToNextLevel;
+            xpBar.style.width = '0%'; timerDisplay.textContent = formatTime(gameTime);
+            levelUpScreen.style.display = 'none'; gameOverScreen.style.display = 'none';
+        }
+
+        function startGame() {
+            resetGameState();
+            if (gameTimerInterval) clearInterval(gameTimerInterval);
+            gameTimerInterval = setInterval(() => { /* ... časovač a ztěžování ... */
+                 if (!isPaused && !isGameOver) {
+                    gameTime++;
+                    timerDisplay.textContent = formatTime(gameTime);
+                    currentEnemySpawnRate = Math.max(ENEMY_SPAWN_RATE_MIN, ENEMY_SPAWN_RATE_START - Math.floor(gameTime / 4));
+                    currentEnemyHealthBase = ENEMY_HEALTH_START + Math.floor(gameTime / 8);
+                }
+            }, 1000);
+            if (animationFrameId) cancelAnimationFrame(animationFrameId);
+            gameLoop();
+        }
+
+        // --- Herní Smyčka ---
+        function gameLoop() { /* ... zůstává stejná ... */
+             animationFrameId = requestAnimationFrame(gameLoop);
+             if (isGameOver) return;
+             if (isPaused) return;
+             update();
+             draw();
+         }
+
+        // --- Aktualizační Funkce ---
+        function update() {
+            updatePlayer();
+            handleWeaponFiring(); // Zpracuje všechny aktivní zbraně
+            updateProjectiles();
+            updateEnemies();
+            updateXpOrbs();
+            handleEnemySpawning();
+            handleCollisions(); // Musí počítat s různými tvary/velikostmi nepřátel
+
+            if (playerInvincibleTimer > 0) playerInvincibleTimer--;
+            if (player.health <= 0 && !isGameOver) { isGameOver = true; showGameOver(); }
+        }
+
+        function updatePlayer() { /* ... pohyb hráče zůstává stejný ... */
+            let dx = 0, dy = 0;
+            if (keysPressed['arrowup'] || keysPressed['w']) dy -= 1;
+            if (keysPressed['arrowdown'] || keysPressed['s']) dy += 1;
+            if (keysPressed['arrowleft'] || keysPressed['a']) dx -= 1;
+            if (keysPressed['arrowright'] || keysPressed['d']) dx += 1;
+            const len = Math.sqrt(dx * dx + dy * dy);
+            if (len > 0) { dx = (dx / len) * player.speed; dy = (dy / len) * player.speed; }
+            player.x += dx; player.y += dy;
+            player.x = Math.max(0, Math.min(canvas.width - player.size, player.x));
+            player.y = Math.max(0, Math.min(canvas.height - player.size, player.y));
+         }
+
+        // --- NOVÝ SYSTÉM ZBRANÍ ---
+        function handleWeaponFiring() {
+            if (isPaused) return;
+
+            const playerCenterX = player.x + player.size / 2;
+            const playerCenterY = player.y + player.size / 2;
+
+            player.weapons.forEach(weapon => {
+                weapon.cooldown--;
+
+                // Výpočet modifikátorů
+                const fireRate = (weapon.baseFireRate || 60) / player.statModifiers.fireRateMultiplier; // 60 jako default
+                const damage = (weapon.baseDamage || 0) * player.statModifiers.damageMultiplier;
+                const area = player.statModifiers.areaMultiplier;
+
+                if (weapon.cooldown <= 0) {
+                    switch (weapon.id) {
+                        case 'pistol': {
+                            const numProjectiles = weapon.projectilesPerShot || 1;
+                            const angleSpread = numProjectiles > 1 ? Math.PI / 18 : 0; // Rozptyl pro více střel
+                            const baseDx = mousePos.x - playerCenterX;
+                            const baseDy = mousePos.y - playerCenterY;
+                            const baseDist = Math.sqrt(baseDx * baseDx + baseDy * baseDy) || 1;
+                            const baseAngle = Math.atan2(baseDy, baseDx);
+
+                            for (let i = 0; i < numProjectiles; i++) {
+                                const currentAngle = baseAngle + (i - (numProjectiles - 1) / 2) * angleSpread;
+                                const vx = Math.cos(currentAngle) * PROJECTILE_SPEED;
+                                const vy = Math.sin(currentAngle) * PROJECTILE_SPEED;
+
+                                projectiles.push({
+                                    x: playerCenterX - PROJECTILE_SIZE / 2, y: playerCenterY - PROJECTILE_SIZE / 2,
+                                    vx: vx, vy: vy, size: PROJECTILE_SIZE, damage: damage,
+                                    color: '#ffeb3b', bounces: 0, maxBounces: PROJECTILE_MAX_BOUNCES
+                                });
+                            }
+                            weapon.cooldown = fireRate; // Použij modifikovanou kadenci
+                            break;
+                        }
+                        case 'aura': {
+                            const auraRadius = (weapon.baseRadius || 60) * area;
+                            enemies.forEach(enemy => {
+                                if (distance(playerCenterX, playerCenterY, enemy.x + enemy.size / 2, enemy.y + enemy.size / 2) < auraRadius) {
+                                    enemy.health -= damage;
+                                    // Možná přidat vizuální efekt zásahu aury
+                                    if (enemy.health <= 0) {
+                                        // Nepřítel zemřel aurou - spawn XP (vyřešeno v handleCollisions, ale pro jistotu)
+                                        // Je třeba zabránit dvojímu spawnu XP, pokud aura zabije těsně před kolizí projektilu
+                                        // Lepší je nechat handleCollisions, aby řešil smrt a XP
+                                    }
+                                }
+                            });
+                             // Vizuální efekt aury by se kreslil v draw()
+                            weapon.cooldown = fireRate; // Interval aury
+                            break;
+                        }
+                         case 'back_shot': {
+                             // Střelí přímo dozadu vzhledem k myši (nebo pohybu?) - zkusme k myši
+                            const dx = playerCenterX - mousePos.x; // Opačný směr
+                            const dy = playerCenterY - mousePos.y;
+                            const dist = Math.sqrt(dx*dx + dy*dy) || 1;
+                            const vx = (dx / dist) * PROJECTILE_SPEED;
+                            const vy = (dy / dist) * PROJECTILE_SPEED;
+
+                             projectiles.push({
+                                x: playerCenterX - PROJECTILE_SIZE / 2, y: playerCenterY - PROJECTILE_SIZE / 2,
+                                vx: vx, vy: vy, size: PROJECTILE_SIZE, damage: damage,
+                                color: '#f06292', bounces: 0, maxBounces: 0 // Zadní střely se neodráží
+                            });
+                             weapon.cooldown = fireRate;
+                            break;
+                         }
+                    }
+                }
+            });
+        }
+
+        function updateProjectiles() { /* ... odrážení zůstává stejné ... */
+             for (let i = projectiles.length - 1; i >= 0; i--) {
+                const p = projectiles[i];
+                p.x += p.vx; p.y += p.vy;
+                let bounced = false;
+                if (p.x <= 0 && p.vx < 0) { p.vx *= -1; p.x = 0; p.bounces++; bounced = true; }
+                else if (p.x + p.size >= canvas.width && p.vx > 0) { p.vx *= -1; p.x = canvas.width - p.size; p.bounces++; bounced = true; }
+                if (p.y <= 0 && p.vy < 0) { p.vy *= -1; p.y = 0; p.bounces++; bounced = true; }
+                else if (p.y + p.size >= canvas.height && p.vy > 0) { p.vy *= -1; p.y = canvas.height - p.size; p.bounces++; bounced = true; }
+                if (p.bounces > p.maxBounces) projectiles.splice(i, 1);
+            }
+        }
+
+        function handleEnemySpawning() { /* ... používá sprite a baseSize ... */
+            enemySpawnCooldown--;
+            if (enemySpawnCooldown <= 0) {
+                const typeTemplate = enemyTypes[getRandomInt(0, enemyTypes.length - 1)];
+                const sprite = typeTemplate.sprite;
+                const enemySizeOnCanvas = sprite.size * PIXEL_SCALE;
+
+                const side = getRandomInt(0, 3); let spawnX, spawnY; const margin = 30;
+                if (side === 0) { spawnX = Math.random() * canvas.width; spawnY = -enemySizeOnCanvas - margin; }
+                else if (side === 1) { spawnX = canvas.width + margin; spawnY = Math.random() * canvas.height; }
+                else if (side === 2) { spawnX = Math.random() * canvas.width; spawnY = canvas.height + margin; }
+                else { spawnX = -enemySizeOnCanvas - margin; spawnY = Math.random() * canvas.height; }
+
+                enemies.push({
+                    x: spawnX, y: spawnY,
+                    sprite: sprite, // Odkaz na sprite
+                    size: enemySizeOnCanvas, // Velikost na canvasu pro kolize
+                    baseSize: sprite.size, // Velikost spritu v pixelech
+                    speed: (ENEMY_BASE_SPEED + Math.random() * 0.4) * typeTemplate.speedMultiplier,
+                    maxHealth: Math.max(1, Math.floor(currentEnemyHealthBase * typeTemplate.healthMultiplier)),
+                    health: Math.max(1, Math.floor(currentEnemyHealthBase * typeTemplate.healthMultiplier)),
+                    damage: ENEMY_DAMAGE, color: '#ff0000', // Záložní barva
+                    xpValue: Math.max(1, Math.floor(XP_PER_ENEMY * typeTemplate.xpMultiplier))
+                });
+                enemySpawnCooldown = currentEnemySpawnRate;
+            }
+         }
+
+        function updateEnemies() { /* ... pohyb zůstává stejný ... */
+            enemies.forEach(enemy => {
+                const playerCenterX = player.x + player.size / 2; const playerCenterY = player.y + player.size / 2;
+                const enemyCenterX = enemy.x + enemy.size / 2; const enemyCenterY = enemy.y + enemy.size / 2;
+                const dx = playerCenterX - enemyCenterX; const dy = playerCenterY - enemyCenterY;
+                const dist = Math.sqrt(dx * dx + dy * dy);
+                if (dist > 0) { enemy.x += (dx / dist) * enemy.speed; enemy.y += (dy / dist) * enemy.speed; }
+            });
+        }
+
+        function updateXpOrbs() { /* ... žádná změna ... */ }
+
+        // --- Kolize (používá size pro AABB) ---
+        function checkCollision(obj1, obj2) {
+            // Jednoduchá AABB kolize
+             return obj1.x < obj2.x + obj2.size &&
+                    obj1.x + obj1.size > obj2.x &&
+                    obj1.y < obj2.y + obj2.size &&
+                    obj1.y + obj1.size > obj2.y;
+        }
+
+        function handleCollisions() {
+             // Iterace od konce pro bezpečné mazání
+             // Kolize Projektil -> Nepřítel
+            for (let i = projectiles.length - 1; i >= 0; i--) {
+                const proj = projectiles[i]; if (!proj) continue;
+                for (let j = enemies.length - 1; j >= 0; j--) {
+                    const enemy = enemies[j]; if (!enemy) continue;
+                    if (checkCollision(proj, enemy)) {
+                        enemy.health -= proj.damage;
+                        projectiles.splice(i, 1); // Odstranit projektil
+
+                        if (enemy.health <= 0) {
+                            // Spawn XP orb
+                            xpOrbs.push({
+                                x: enemy.x + enemy.size / 2 - XP_ORB_SIZE / 2, y: enemy.y + enemy.size / 2 - XP_ORB_SIZE / 2,
+                                size: XP_ORB_SIZE, value: enemy.xpValue, color: '#4caf50'
+                            });
+                            enemies.splice(j, 1); // Odstranit nepřítele
+                        }
+                        break; // Projektil zasáhl, přejdi na další projektil
+                    }
+                }
+            }
+
+            // Kolize Hráč -> Nepřítel
+            if (playerInvincibleTimer <= 0) {
+                for (let j = enemies.length - 1; j >= 0; j--) {
+                     const enemy = enemies[j]; if (!enemy) continue;
+                     if (checkCollision(player, enemy)) {
+                        player.health -= enemy.damage;
+                        playerInvincibleTimer = INVINCIBILITY_DURATION;
+                        healthDisplay.textContent = Math.max(0, player.health);
+                        // Odhození
+                        const knockbackStrength = 15;
+                        const dx = player.x - enemy.x; const dy = player.y - enemy.y;
+                        const dist = Math.sqrt(dx*dx + dy*dy) || 1;
+                        enemy.x -= (dx/dist) * knockbackStrength; enemy.y -= (dy/dist) * knockbackStrength;
+                        break; // Jen jeden zásah za frame
+                    }
+                }
+            }
+
+            // Kolize Hráč -> XP Orb
+             for (let k = xpOrbs.length - 1; k >= 0; k--) {
+                 const orb = xpOrbs[k]; if (!orb) continue;
+                 // Použijeme vzdálenost středů pro snazší sběr
+                 const pickupRadius = player.size / 2 + orb.size * 2; // Efektivní dosah sběru
+                 if (distance(player.x + player.size / 2, player.y + player.size / 2,
+                             orb.x + orb.size / 2, orb.y + orb.size / 2) < pickupRadius) {
+                    gainXP(orb.value); xpOrbs.splice(k, 1);
+                 }
+             }
+        }
+
+        // --- XP a Level Up ---
+        function gainXP(amount) { /* ... beze změny ... */ if (isGameOver) return; player.xp += amount; if (player.xp >= player.xpToNextLevel) { levelUp(); } updateXPUI(); }
+        function levelUp() { /* ... beze změny ... */ player.level++; const leftoverXp = player.xp - player.xpToNextLevel; player.xp = Math.max(0, leftoverXp); player.xpToNextLevel = Math.floor(LEVEL_XP_BASE * Math.pow(LEVEL_XP_FACTOR, player.level - 1)); levelDisplay.textContent = player.level; updateXPUI(); isPaused = true; showLevelUpOptions(); }
+        function updateXPUI() { /* ... beze změny ... */ xpValueDisplay.textContent = player.xp; xpNeededDisplay.textContent = player.xpToNextLevel; const xpPercentage = Math.max(0, Math.min(100, (player.xp / player.xpToNextLevel) * 100)); xpBar.style.width = `${xpPercentage}%`; }
+
+        // --- VYLEPŠENÍ (včetně zbraní) ---
+        const BASE_UPGRADES = [
+            // Statistiky hráče
+            { id: "health", name: "Více zdraví", description: "Zvýší max zdraví a vyléčí.", type: "stat", apply: () => { player.maxHealth += 25; player.health = player.maxHealth; healthDisplay.textContent = player.health;} },
+            { id: "speed", name: "Rychlejší pohyb", description: "Zvýší rychlost pohybu hráče.", type: "stat", apply: () => player.speed += 0.4 },
+            { id: "damage_mult", name: "Globální poškození", description: "Zvýší veškeré udělené poškození.", type: "stat", apply: () => player.statModifiers.damageMultiplier += 0.15 },
+            { id: "firerate_mult", name: "Globální kadence", description: "Zvýší rychlost všech útoků.", type: "stat", apply: () => player.statModifiers.fireRateMultiplier += 0.15 },
+             { id: "area_mult", name: "Globální dosah/oblast", description: "Zvýší dosah/oblast některých útoků.", type: "stat", apply: () => player.statModifiers.areaMultiplier += 0.2 },
+        ];
+
+        const WEAPON_DEFINITIONS = {
+            'pistol': { name: "Pistole", baseFireRate: 40, baseDamage: 10, projectilesPerShot: 1, maxLevel: 5, upgradeDesc: "Střel/Pošk./Kadence" },
+            'aura': { name: "Aura", baseFireRate: 70, baseDamage: 5, baseRadius: 60, maxLevel: 5, upgradeDesc: "Pošk./Dosah/Interval" },
+            'back_shot': { name: "Zadní výstřel", baseFireRate: 55, baseDamage: 8, maxLevel: 5, upgradeDesc: "Pošk./Kadence" },
+        };
+
+        function getWeaponUpgradeOptions() {
+            let options = [];
+            // Možnost přidat novou zbraň
+            const ownedWeaponIds = player.weapons.map(w => w.id);
+            for (const weaponId in WEAPON_DEFINITIONS) {
+                if (!ownedWeaponIds.includes(weaponId)) {
+                    options.push({
+                        id: `add_${weaponId}`, name: `Přidat: ${WEAPON_DEFINITIONS[weaponId].name}`,
+                        description: `Začneš používat novou zbraň.`, type: 'weapon_add', weaponId: weaponId
+                    });
+                }
+            }
+            // Možnost vylepšit existující zbraň
+            player.weapons.forEach(weapon => {
+                const def = WEAPON_DEFINITIONS[weapon.id];
+                if (weapon.level < def.maxLevel) {
+                    options.push({
+                        id: `upgrade_${weapon.id}`, name: `Vylepšit: ${def.name} (Lvl ${weapon.level + 1})`,
+                        description: `Zlepšuje: ${def.upgradeDesc}`, type: 'weapon_upgrade', weaponId: weapon.id
+                    });
+                }
+            });
+            return options;
+        }
+
+        function showLevelUpOptions() {
+            upgradeOptionsContainer.innerHTML = '';
+            currentUpgradeChoices = [];
+
+            const allPossible = [...BASE_UPGRADES, ...getWeaponUpgradeOptions()];
+            // Náhodně promíchat pole
+             allPossible.sort(() => Math.random() - 0.5);
+
+            const numOptions = Math.min(3, allPossible.length); // Zobrazit max 3
+
+            for (let i = 0; i < numOptions; i++) {
+                const upgrade = allPossible[i];
+                currentUpgradeChoices.push(upgrade);
+
+                const button = document.createElement('button');
+                button.classList.add('upgrade-button');
+                // Použijeme innerHTML pro formátování s <small>
+                button.innerHTML = `${upgrade.name} <small>${upgrade.description}</small>`;
+                button.onclick = () => selectUpgrade(i);
+                upgradeOptionsContainer.appendChild(button);
+            }
+             levelUpScreen.style.display = 'block';
+        }
+
+         function selectUpgrade(choiceIndex) {
+            const chosenUpgrade = currentUpgradeChoices[choiceIndex];
+            if (!chosenUpgrade) return;
+
+            if (chosenUpgrade.type === 'stat') {
+                chosenUpgrade.apply();
+            } else if (chosenUpgrade.type === 'weapon_add') {
+                const def = WEAPON_DEFINITIONS[chosenUpgrade.weaponId];
+                player.weapons.push({
+                     id: chosenUpgrade.weaponId, level: 1, cooldown: 0,
+                     // Přidat základní staty z definice
+                     baseFireRate: def.baseFireRate, baseDamage: def.baseDamage,
+                     projectilesPerShot: def.projectilesPerShot, baseRadius: def.baseRadius
+                 });
+            } else if (chosenUpgrade.type === 'weapon_upgrade') {
+                const weaponToUpgrade = player.weapons.find(w => w.id === chosenUpgrade.weaponId);
+                if (weaponToUpgrade) {
+                    weaponToUpgrade.level++;
+                    // Aplikovat specifická vylepšení zbraně na základě levelu
+                    applyWeaponLevelBonuses(weaponToUpgrade);
+                }
+            }
+
+            levelUpScreen.style.display = 'none';
+            isPaused = false;
+        }
+
+        // Aplikuje bonusy za level zbraně
+        function applyWeaponLevelBonuses(weapon) {
+             switch (weapon.id) {
+                 case 'pistol':
+                     // Každý level může přidat střelu nebo zvýšit poškození/rychlost
+                     weapon.projectilesPerShot = 1 + Math.floor((weapon.level-1) / 2); // Přidá střelu každý druhý level
+                     weapon.baseDamage = 10 + (weapon.level - 1) * 3; // Zvýšení poškození
+                     weapon.baseFireRate = 40 - (weapon.level - 1) * 3; // Zrychlení střelby
+                     break;
+                 case 'aura':
+                     weapon.baseDamage = 5 + (weapon.level - 1) * 2;
+                     weapon.baseRadius = 60 + (weapon.level - 1) * 10;
+                     weapon.baseFireRate = 70 - (weapon.level - 1) * 5; // Kratší interval
+                     break;
+                 case 'back_shot':
+                      weapon.baseDamage = 8 + (weapon.level - 1) * 4;
+                      weapon.baseFireRate = 55 - (weapon.level - 1) * 5;
+                      break;
+             }
+        }
+
+        // --- Kreslící Funkce ---
+        // --- NOVÁ FUNKCE pro kreslení pixel artu ---
+        function drawPixelArt(sprite, x, y) {
+            const { size, map, colors } = sprite;
+            const totalSize = size * PIXEL_SCALE; // Velikost na canvasu
+
+            for (let r = 0; r < size; r++) { // Řádky spritu
+                for (let c = 0; c < size; c++) { // Sloupce spritu
+                    const char = map[r][c];
+                    const color = colors[char];
+                    if (color) { // Pokud znak odpovídá barvě (ignoruje mezery atd.)
+                        ctx.fillStyle = color;
+                        ctx.fillRect(
+                            Math.floor(x + c * PIXEL_SCALE), // X pozice na canvasu
+                            Math.floor(y + r * PIXEL_SCALE), // Y pozice na canvasu
+                            PIXEL_SCALE,             // Šířka "pixelu"
+                            PIXEL_SCALE              // Výška "pixelu"
+                        );
+                    }
+                }
+            }
+        }
+
+        function draw() {
+            ctx.fillStyle = '#282c34'; ctx.fillRect(0, 0, canvas.width, canvas.height);
+            xpOrbs.forEach(orb => drawCircle(orb.x, orb.y, orb.size / 2, orb.color)); // Kreslí malé kruhy pro XP
+            projectiles.forEach(p => drawRect(p.x, p.y, p.size, p.size, p.color));
+            drawEnemies(); // Kreslí nepřátele pomocí pixel artu
+            drawPlayer(); // Kreslí hráče pomocí pixel artu
+             // Volitelně: Kreslení aury (např. průhledný kruh)
+            const auraWeapon = player.weapons.find(w => w.id === 'aura');
+            if(auraWeapon && !isPaused) {
+                const auraRadius = (auraWeapon.baseRadius || 60) * player.statModifiers.areaMultiplier;
+                ctx.beginPath();
+                ctx.arc(player.x + player.size / 2, player.y + player.size / 2, auraRadius, 0, Math.PI * 2);
+                ctx.fillStyle = 'rgba(150, 200, 255, 0.1)'; // Slabá modrá aura
+                ctx.fill();
+                ctx.strokeStyle = 'rgba(200, 220, 255, 0.3)';
+                ctx.lineWidth = 2;
+                ctx.stroke();
+            }
+        }
+
+        function drawPlayer() {
+             if (playerInvincibleTimer > 0 && Math.floor(playerInvincibleTimer / 4) % 2 === 0) return; // Blikání
+             drawPixelArt(player.sprite, player.x, player.y);
+        }
+
+        function drawEnemies() {
+             enemies.forEach(enemy => {
+                drawPixelArt(enemy.sprite, enemy.x, enemy.y);
+                // Ukazatel zdraví (zůstává stejný)
+                if (enemy.health < enemy.maxHealth) {
+                     const healthBarYOffset = 8; const healthBarWidth = enemy.size; const healthBarHeight = 4;
+                     const healthPercentage = Math.max(0, enemy.health / enemy.maxHealth);
+                     ctx.fillStyle = '#555'; ctx.fillRect(enemy.x, enemy.y - healthBarYOffset, healthBarWidth, healthBarHeight);
+                     ctx.fillStyle = '#f44336'; ctx.fillRect(enemy.x, enemy.y - healthBarYOffset, healthBarWidth * healthPercentage, healthBarHeight);
+                 }
+            });
+        }
+
+        // Pomocné kreslící funkce (drawRect, drawCircle) - používají se pro projektily a XP
+        function drawRect(x, y, width, height, color) { ctx.fillStyle = color; ctx.fillRect(x, y, width, height); }
+        function drawCircle(x, y, radius, color) { ctx.fillStyle = color; ctx.beginPath(); ctx.arc(x + radius, y + radius, radius, 0, Math.PI * 2); ctx.fill(); ctx.closePath(); }
+
+
+        // --- Konec Hry ---
+         function showGameOver() { /* ... beze změny ... */ if (gameTimerInterval) clearInterval(gameTimerInterval); finalTimeDisplay.textContent = formatTime(gameTime); finalLevelDisplay.textContent = player.level; gameOverScreen.style.display = 'block'; }
+
+        // --- Ovládání ---
+        document.addEventListener('keydown', (e) => { /* ... beze změny ... */ if (["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "w", "a", "s", "d"].includes(e.key)) e.preventDefault(); keysPressed[e.key.toLowerCase()] = true; });
+        document.addEventListener('keyup', (e) => { /* ... beze změny ... */ keysPressed[e.key.toLowerCase()] = false; });
+        canvas.addEventListener('mousemove', (evt) => { /* ... beze změny ... */ if (!isPaused && !isGameOver) mousePos = getMousePos(canvas, evt); });
+
+         // --- Restart ---
+         restartButton.addEventListener('click', startGame);
+
+        // --- Spuštění Hry ---
+        window.onload = startGame;
+
+    </script>
+
+</body>
+</html>
